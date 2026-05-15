@@ -61,3 +61,51 @@ random agent scores about 1-2, human average is around 30.
 based on
 
 Human-level control through deep reinforcement learning, Mnih et al., Nature 2015
+
+
+FLOW
+
+1. OBSERVE
+   agent looks at the last 4 grayscale frames → (4, 84, 84)
+
+2. ACT
+   if random() < epsilon : random action (explore)
+   else: pass frames through CNN → get Q-values for all 4 actions
+          and pick the highest one (exploit)
+
+3. ENVIRONMENT STEP
+   take the action : get reward, next 4 frames, done
+
+4. STORE
+   push (obs, action, reward, next_obs, done) into replay buffer
+
+5. SAMPLE (every 4 steps, after 80k)
+   pull a random batch of 32 transitions from the buffer
+
+6. COMPUTE TARGET via Bellman
+   pass next_obs through target network → get Q-values
+   y = r + 0.99 * max Q_target(next_obs) * (1 - done)
+
+7. COMPUTE PREDICTION
+   pass obs through online network
+   grab Q-value only for the action that was actually taken via gather()
+
+8. COMPUTE LOSS
+   huber(prediction - target)
+   i.e. how wrong was the online network's Q-value estimate
+
+9. BACKPROP
+   optimizer.zero_grad()
+   loss.backward()
+   clip gradients
+   optimizer.step() : online network weights update
+
+10. TARGET NETWORK UPDATE (every 10k steps)
+    copy online network weights : target network
+    target stays frozen until next 10k steps
+
+11. EPSILON DECAY
+    nudge epsilon down slightly
+    more exploitation as training progresses
+
+repeat from step 1
