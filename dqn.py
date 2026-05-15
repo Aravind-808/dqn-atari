@@ -108,7 +108,7 @@ class Config:
     # every 10k steps copy the online network weights into
     # the target network. between copies the target stays frozen. without this the
     # bellman target y = r + gamma * max Q_target(s') shifts every single update
-    total_steps = 10_000_000
+    total_steps = 2_000_000
     start_learning = 80_000
     train_freq = 4
     target_update = 10_000
@@ -126,7 +126,7 @@ class Config:
     # it will learn stuff
     eps_st = 1.0
     eps_end = 0.01
-    eps_anneal = 500_000
+    eps_anneal = 1_000_000
 
     log_interval = 1_000
     save_interval = 100_000
@@ -145,7 +145,7 @@ class ReplayBuffer:
         self.obs = np.zeros((capacity, *obs_shape), dtype = np.uint8)
         self.next_obs = np.zeros((capacity, *obs_shape), dtype = np.uint8)
 
-        self.actions = np.zeros((capacity, ), dtype = np.uint8)
+        self.actions = np.zeros((capacity, ), dtype = np.int64)
         self.rewards = np.zeros((capacity, ), dtype = np.float32)
         self.dones = np.zeros((capacity, ), dtype = np.float32)
 
@@ -229,5 +229,150 @@ def select_action(qnet, obs, epsilon, n_actions, device):
 
 def linear_epsilon(step, cfg):
     # linearly decay epsilon value from eps_start to eps_end
-    fraction = min(step / cfg.eps_decay_steps, 1.0)
-    return cfg.eps_start + fraction * (cfg.eps_end - cfg.eps_start)
+    fraction = min(step / cfg.eps_anneal, 1.0)
+    return cfg.eps_st + fraction * (cfg.eps_end - cfg.eps_st)
+
+# emulate an target net (separate from online net) 
+# that updates only every 10k steps
+def compute_loss(online_net, target_net, batch, gamma):
+    obs, actions, rewards, next_obs, dones = batch
+    
+    # current q_vals from the action taken
+    q_vals = online_net(obs).gather(1, actions.unsqueeze(1)).squeeze(1)
+
+    with torch.no_grad():
+        max_next_q = target_net(next_obs).max(dim=1).values
+        targets = rewards + gamma * max_next_q * (1.0 - dones)
+    
+    # choosing huber loss over MSE
+    loss = nn.functional.smooth_l1_loss(q_vals, targets)
+    return loss
+
+def make_env(env_id, seed, render = False):
+    render_mode = "human" if render else None
+
+    no_skip_id = env_id.replace("-v5", "NoFrameskip-v4").replace("ALE/", "")
+    env = gym.make(no_skip_id, render_mode=render_mode)
+    env = AtariPreprocessing(env, grayscale_obs=True, scale_obs=False, frame_skip=4)
+    env = FrameStackObservation(env, stack_size=4)
+    env.action_space.seed(seed)
+    return env
+
+def train(cfg):
+    os.makedirs(cfg.save_dir, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+
+    env = make_env(cfg.env_id, cfg.seed)
+    n_actions = env.action_space.n
+    obs_shape = env.observation_space.shape  # (4, 84, 84)
+    print(f"Env: {cfg.env_id}  |  Actions: {n_actions}  |  Obs: {obs_shape}")
+
+    online_net = DQN(n_actions).to(device)
+    target_net = DQN(n_actions).to(device)
+    target_net.load_state_dict(online_net.state_dict())
+    target_net.eval()
+
+    optimizer = optim.Adam(online_net.parameters(), lr=cfg.lr)
+    buffer = ReplayBuffer(cfg.buffer_size, obs_shape, device)
+
+    # METRICS
+    ep_rewards = []
+    ep_lens = []
+    losses = []
+
+    obs, _ = env.reset(seed=cfg.seed)
+    ep_reward, ep_len = 0.0, 0
+    start_time = time.time()
+
+    print("STARTING TRAINING !!!!!!")
+
+    '''
+    for reference 
+    total_steps = 10_000_000
+    start_learning = 80_000
+    train_freq = 4
+    target_update = 10_000
+    '''
+
+    for step in range(1, cfg.total_steps+1):
+        eps = linear_epsilon(step, cfg)
+        action = select_action(online_net, obs, eps, n_actions, device)
+
+        next_obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+    
+        clipped_rew = float(np.clip(reward, -1.0, 1.0))
+
+        buffer.push(obs, action, clipped_rew, next_obs, terminated)
+        obs = next_obs
+        ep_reward+=reward
+        ep_len += 1
+
+        if done:
+            ep_rewards.append(ep_reward)
+            ep_lens.append(ep_len)
+
+            obs, _ = env.reset()
+            ep_reward, ep_len = 0.0,0
+
+        if step >= cfg.start_learning and step % cfg.train_freq == 0:
+            batch = buffer.sample(cfg.batch_size)
+            loss  = compute_loss(online_net, target_net, batch, cfg.gamma)
+ 
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(online_net.parameters(), cfg.grad_clip)
+            optimizer.step()
+ 
+            losses.append(loss.item())
+        
+        if step % cfg.target_update == 0:
+            target_net.load_state_dict(online_net.state_dict())
+        
+        if step % cfg.log_interval == 0:
+            sps = step / (time.time() - start_time)
+            n_ep = len(ep_rewards)
+            recent = ep_rewards[-20:] if n_ep else [0]
+            mean_r = np.mean(recent)
+            mean_l = np.mean(losses[-100:]) if losses else float("nan")
+ 
+            print(
+                f"step={step:>8,}  eps={eps:.3f}  "
+                f"ep={n_ep:>6,}  mean_reward(20)={mean_r:>7.1f}  "
+                f"loss={mean_l:.4f}  buf={len(buffer):>7,}  sps={sps:.0f}"
+            )
+
+        if step % cfg.save_interval == 0:
+            path = os.path.join(cfg.save_dir, f"dqn_{step}.pt")
+            torch.save({
+                "step":       step,
+                "online":     online_net.state_dict(),
+                "target":     target_net.state_dict(),
+                "optimizer":  optimizer.state_dict(),
+                "ep_rewards": ep_rewards,
+            }, path)
+            print(f"  → checkpoint saved: {path}")
+    
+    env.close()
+
+    final_path = os.path.join(cfg.save_dir, "best_model.pt")
+    torch.save({
+        "step":       cfg.total_steps,
+        "online":     online_net.state_dict(),
+        "target":     target_net.state_dict(),
+        "optimizer":  optimizer.state_dict(),
+        "ep_rewards": ep_rewards,
+        "config":     cfg,
+    }, final_path)
+    print(f"\nTraining complete. Final model saved at {final_path}")
+    return online_net, ep_rewards
+
+if __name__ == "__main__":
+    cfg = Config()
+    train(cfg)
