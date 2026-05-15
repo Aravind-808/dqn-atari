@@ -162,5 +162,72 @@ class ReplayBuffer:
     
     def sample(self, batch_size):
         # sample a random batch of transitions and return as tensors
-        pass
+        idxs = np.random.randint(0, self.size, size = batch_size)
 
+        # normalize since stored as uint
+        obs = torch.tensor(self.obs[idxs], dtype = torch.float32,device=self.device) / 255.0
+        next_obs = torch.tensor(self.next_obs[idxs], dtype = torch.float32,device=self.device) / 255.0
+
+        actions = torch.tensor(self.actions[idxs], dtype = torch.int64,device = self.device)
+        rewards = torch.tensor(self.rewards[idxs], dtype = torch.float32, device = self.device)
+        dones= torch.as_tensor(self.dones[idxs],dtype=torch.float32, device=self.device)
+        
+        return obs, actions, rewards, next_obs, dones
+
+    def __len__(self):
+        return self.size
+
+'''
+input: stack of 4 grayscale frames: dims = 84x84 (4, 84, 84)
+output: q value for every action (n_actions, )
+
+Conv(32, 8x8, stride 4), Conv(64, 4x4, stride 2)
+Conv(64, 3x3, stride 1), FC(512) → FC(n_actions)
+'''
+class DQN(nn.Module):
+    def __init__(self, n_actions):
+        super().__init__()
+
+        # out_size = floor((input_size - kernel_size) / stride) + 1
+        self.features = nn.Sequential(
+            nn.Conv2d(4, 32, 8, 4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, 1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        self.head = nn.Sequential(
+            nn.Linear(3136, 512),
+            nn.ReLU(),
+            nn.Linear(512, n_actions),
+        )
+
+        self._init_weights()
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        return self.head(self.features(x))
+
+def select_action(qnet, obs, epsilon, n_actions, device):
+    if random.random() < epsilon:
+        return random.randrange(n_actions)
+
+    else:
+        obs_t = torch.as_tensor(obs, dtype = torch.float32, device = device).unsqueeze(0)/255.0
+        with torch.no_grad():
+            q_vals = qnet(obs_t)
+        
+        return int(q_vals.argmax(dim = 1).item())
+
+def linear_epsilon(step, cfg):
+    # linearly decay epsilon value from eps_start to eps_end
+    fraction = min(step / cfg.eps_decay_steps, 1.0)
+    return cfg.eps_start + fraction * (cfg.eps_end - cfg.eps_start)
