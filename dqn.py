@@ -4,7 +4,8 @@ some basic terms to know before proceeding
 episode: 
 an episode is one full game from start to finish. for eg. in subway surfers, 
 its from when the guy starts running till when he crashes into something and gets caught 
-by the policeman. good agents have higher total reward than bad ones.
+by the policeman. good agents have higher total reward than bad ones, or shorter episodes than bad ones,
+depending on the situation/nature of the task
 
 step: 
 a step is one "tick" of the game loop. agent sees screen, picks action,
@@ -100,7 +101,7 @@ class Config:
     # do absolutely nothing. this is to fill the replay buffer with enough
     # transition data for the model to start learning so that it doesnt overfit
 
-    # train freq means train only every 4 steps. each step adds just 1 transition from the buffer
+    # train freq means train only every 4 steps. each step adds just 1 transition to the buffer
     #
 
     # target_update_freq:
@@ -115,7 +116,7 @@ class Config:
     batch_size = 32
     gamma = 0.99
     lr = 1e-4
-    grad_clip = 10.0 # clipping grads to prevent overfit
+    grad_clip = 10.0 # clipping grads to prevent large af gradient updates
 
     buffer_size = 100_000
 
@@ -133,7 +134,7 @@ class Config:
 
 
 class ReplayBuffer:
-    # circular q implementation 
+    # circular q(ueue) implementation 
     def __init__(self, capacity, obs_shape, device):
         self.capacity = capacity
         self.device = device
